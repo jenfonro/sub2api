@@ -422,6 +422,10 @@ const toggle = () => {
   isOpen.value = !isOpen.value
 }
 
+watch(() => props.disabled, (disabled) => {
+  if (disabled) isOpen.value = false
+})
+
 watch(isOpen, (open) => {
   if (open) {
     calculateDropdownPosition()
@@ -498,6 +502,7 @@ const onTriggerKeyDown = () => {
 }
 
 const onDropdownKeyDown = (e: KeyboardEvent) => {
+  if (e.isComposing) return
   switch (e.key) {
     case 'ArrowDown':
       e.preventDefault()
