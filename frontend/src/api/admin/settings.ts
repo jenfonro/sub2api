@@ -628,6 +628,9 @@ export interface SystemSettings {
   // 分组隔离
   allow_ungrouped_key_scheduling: boolean;
 
+  // Ordinary OpenAI session affinity; unconfigured defaults to false.
+  openai_sticky_session_overflow_enabled?: boolean;
+
   // Gateway forwarding behavior
   openai_ttft_mode: string;
   enable_fingerprint_unification: boolean;
@@ -957,6 +960,7 @@ export interface UpdateSettingsRequest {
   min_claude_code_version?: string;
   max_claude_code_version?: string;
   allow_ungrouped_key_scheduling?: boolean;
+  openai_sticky_session_overflow_enabled?: boolean;
   openai_ttft_mode?: string;
   enable_fingerprint_unification?: boolean;
   enable_metadata_passthrough?: boolean;

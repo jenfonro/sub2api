@@ -87,6 +87,19 @@ const (
 
 type openAIProfitControlGateCtxKey struct{}
 
+// openAIStickyOverflowAccountKey carries the full source account through
+// selection and terminal admission without weakening profit-only spillover.
+type openAIStickyOverflowAccountKey struct{}
+
+// WebSocket admission contexts survive across attempts; a capacity migration
+// observed by an earlier selection must not authorize a later profit spillover.
+func withoutOpenAIStickyOverflow(ctx context.Context) context.Context {
+	if accountID, _ := ctx.Value(openAIStickyOverflowAccountKey{}).(int64); accountID > 0 {
+		return context.WithValue(ctx, openAIStickyOverflowAccountKey{}, int64(0))
+	}
+	return ctx
+}
+
 // openAIProfitControlSuppressCtxKey 标记本请求显式跳过利润门（独立图片/视频
 // 端点、Grok 媒体、count_tokens、live 等利润门范围外流量）。所有装门点看到该
 // 标记后一律不装门，防止 service 层防御性装门把边界外流量重新拉回利润过滤。
@@ -272,7 +285,7 @@ func (s *OpenAIGatewayService) resolveOpenAIProfitControlGate(ctx context.Contex
 // attachSelectionProfitGate 把调度上下文里生效的利润门记录到选号结果上。门在
 // 选号函数内部的局部 ctx 上安装（composite/fallback 路由还可能解析出与入口
 // 分组不同的门），不随返回值离开调度栈；结果携带后 handler 才能对"真实过滤了
-// 候选的那个门"做抢槽后终检与准入后绑定。
+// 候选的那个门"做抢槽后终检与准入后绑定，同时携带满载迁移来源。
 func attachSelectionProfitGate(ctx context.Context, sel *AccountSelectionResult) *AccountSelectionResult {
 	if sel == nil {
 		return nil
@@ -280,15 +293,22 @@ func attachSelectionProfitGate(ctx context.Context, sel *AccountSelectionResult)
 	if gate, ok := ctx.Value(openAIProfitControlGateCtxKey{}).(*openAIProfitControlGate); ok && gate != nil {
 		sel.profitGate = gate
 	}
+	sel.stickyOverflowAccountID, _ = ctx.Value(openAIStickyOverflowAccountKey{}).(int64)
 	return sel
 }
 
-// ContextWithSelectionProfitGate 把选号时真实生效的利润门重放到 ctx 上。
+// ContextWithSelectionProfitGate 把选号时真实生效的利润门及满载迁移来源重放到 ctx 上。
 // handler 在拿到选号结果后必须用返回的 ctx 做抢槽后终检
 // （ProfitControlVetoLatest / GatewayProfitControlVetoLatest）与准入后粘性
 // 绑定，否则这两步会因为看不到调度栈内安装的门而退化为空操作。
 func ContextWithSelectionProfitGate(ctx context.Context, sel *AccountSelectionResult) context.Context {
-	if sel == nil || sel.profitGate == nil {
+	if sel == nil {
+		return ctx
+	}
+	if previous, _ := ctx.Value(openAIStickyOverflowAccountKey{}).(int64); previous != sel.stickyOverflowAccountID {
+		ctx = context.WithValue(ctx, openAIStickyOverflowAccountKey{}, sel.stickyOverflowAccountID)
+	}
+	if sel.profitGate == nil {
 		return ctx
 	}
 	if existing, ok := ctx.Value(openAIProfitControlGateCtxKey{}).(*openAIProfitControlGate); ok && existing == sel.profitGate {
@@ -350,10 +370,11 @@ func (s *OpenAIGatewayService) bindOpenAIStickySessionDuringSelection(ctx contex
 
 // BindStickySessionAfterProfitAdmission records the terminally admitted
 // account. Without a profit gate it preserves the pre-existing eager binding
-// behavior at the handler bind points. With a gate it never overwrites a
+// behavior at the handler bind points. With a gate it normally preserves a
 // different binding that already exists, so a temporarily ineligible account
 // remains sticky and becomes eligible again automatically after its rate
-// recovers.
+// recovers. Capacity overflow is the exception: an explicitly full sticky
+// account may be replaced after the new account passes terminal admission.
 func (s *OpenAIGatewayService) BindStickySessionAfterProfitAdmission(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
 	if sessionHash == "" || accountID <= 0 {
 		return nil
@@ -369,7 +390,8 @@ func (s *OpenAIGatewayService) BindStickySessionAfterProfitAdmission(ctx context
 		slog.Warn("profit_control_sticky_binding_read_failed", "group_id", derefGroupID(groupID), "account_id", accountID, "error", err)
 		return nil
 	}
-	if existingAccountID > 0 && existingAccountID != accountID {
+	overflowAccountID, _ := ctx.Value(openAIStickyOverflowAccountKey{}).(int64)
+	if existingAccountID > 0 && existingAccountID != accountID && existingAccountID != overflowAccountID {
 		return nil
 	}
 	return s.BindStickySession(ctx, groupID, sessionHash, accountID)
